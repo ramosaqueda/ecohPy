@@ -12,15 +12,31 @@ from PyQt5.QtCore import Qt, QUrl, QDateTime
 from PyQt5.QtWebEngineWidgets import QWebEngineView
 from PyQt5.QtGui import QColor
 
+
 class MapWindow(QDialog):
     def __init__(self, parent=None):
-        super().__init__(parent)
+        super().__init__()
+        self.parent = parent  # Store reference to parent
         self.setWindowTitle('Mapa')
         layout = QVBoxLayout()
+        
+        # Add map type selector
+        map_type_layout = QHBoxLayout()
+        self.map_type_label = QLabel('Tipo de mapa:')
+        self.map_type_combo = QComboBox()
+        self.map_type_combo.addItems(['OpenStreetMap', 'Satelital', 'Híbrido'])
+        self.map_type_combo.currentTextChanged.connect(self.on_map_type_changed)
+        map_type_layout.addWidget(self.map_type_label)
+        map_type_layout.addWidget(self.map_type_combo)
+        layout.addLayout(map_type_layout)
+        
         self.map_view = QWebEngineView()
         layout.addWidget(self.map_view)
         self.setLayout(layout)
         self.resize(800, 600)
+    def on_map_type_changed(self, map_type):
+        if self.parent:
+            self.parent.update_map_type(map_type)
 
 class CoordPlotter(QWidget):
     def __init__(self):
@@ -29,13 +45,27 @@ class CoordPlotter(QWidget):
         self.map = None
         self.marker_color = "#3388ff"  # Default marker color
         self.date_column = None
+        self.map_window = None
+        self.filtered_df = None  # Store filtered DataFrame
+        self.current_map_type = 'OpenStreetMap'  # Initialize map type
         self.initUI()
 
     def initUI(self):
         self.setWindowTitle('ECOH TOOLS, Geoposicionador de Coordenada Ver 1.0 By Rafo')
         layout = QVBoxLayout()
-
+        
         self.upload_btn = QPushButton('Subir archivo')
+        self.upload_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #25D366;
+                color: white;
+                padding: 10px;
+                border-radius: 5px;
+            }
+            QPushButton:hover {
+                background-color: #128C7E;
+            }
+        """)
         self.upload_btn.clicked.connect(self.upload_file)
         layout.addWidget(self.upload_btn)
 
@@ -77,9 +107,6 @@ class CoordPlotter(QWidget):
         self.filter_btn.clicked.connect(self.apply_filter)
         layout.addWidget(self.filter_btn)
 
-        self.new_window_cb = QCheckBox('Abrir mapa en nueva ventana')
-        layout.addWidget(self.new_window_cb)
-
         self.use_clustering_cb = QCheckBox('Usar agrupación de marcadores')
         self.use_clustering_cb.setChecked(True)
         layout.addWidget(self.use_clustering_cb)
@@ -99,13 +126,8 @@ class CoordPlotter(QWidget):
         self.status_label = QLabel('Esperando archivo...')
         layout.addWidget(self.status_label)
 
-        self.map_view = QWebEngineView()
-        layout.addWidget(self.map_view)
-
         self.setLayout(layout)
         self.setGeometry(300, 300, 800, 600)
-
-        self.map_window = None
 
     def upload_file(self):
         file_path, _ = QFileDialog.getOpenFileName(self, "Seleccionar archivo", "", "Excel Files (*.xlsx);;CSV Files (*.csv)")
@@ -118,8 +140,6 @@ class CoordPlotter(QWidget):
                 self.df = pd.read_excel(file_path)
             else:
                 self.df = pd.read_csv(file_path)
-
-            
 
             self.lat_col = self.find_column(self.df, ['latitud', 'lat', 'latitude'])
             self.lon_col = self.find_column(self.df, ['longitud', 'lon', 'long', 'longitude'])
@@ -139,11 +159,14 @@ class CoordPlotter(QWidget):
             date_columns = self.find_date_columns(self.df)
             self.date_column_combo.addItems(date_columns)
 
-            self.apply_filter()
-
         except Exception as e:
             self.status_label.setText(f'Error al procesar el archivo: {str(e)}')
 
+    def update_map_type(self, map_type):
+            self.current_map_type = map_type
+            if self.filtered_df is not None:
+                self.create_map(self.filtered_df)
+    
     def find_date_columns(self, df):
         date_columns = []
         for col in df.columns:
@@ -168,7 +191,7 @@ class CoordPlotter(QWidget):
         if self.df is None:
             return
 
-        filtered_df = self.df[
+        self.filtered_df = self.df[
             (self.df[self.lat_col] >= self.min_lat.value()) &
             (self.df[self.lat_col] <= self.max_lat.value()) &
             (self.df[self.lon_col] >= self.min_lon.value()) &
@@ -178,16 +201,46 @@ class CoordPlotter(QWidget):
         if self.date_column:
             min_date = self.min_date.dateTime().toPyDateTime()
             max_date = self.max_date.dateTime().toPyDateTime()
-            filtered_df = filtered_df[
-                (pd.to_datetime(filtered_df[self.date_column]) >= min_date) &
-                (pd.to_datetime(filtered_df[self.date_column]) <= max_date)
+            self.filtered_df = self.filtered_df[
+                (pd.to_datetime(self.filtered_df[self.date_column]) >= min_date) &
+                (pd.to_datetime(self.filtered_df[self.date_column]) <= max_date)
             ]
 
-        self.create_map(filtered_df)
+        self.create_map(self.filtered_df)
 
     def create_map(self, df):
-        m = folium.Map(location=[df[self.lat_col].mean(), df[self.lon_col].mean()], zoom_start=10)
-        
+        # Define tile layers for different map types
+        tile_layers = {
+            'OpenStreetMap': folium.TileLayer(
+                tiles='OpenStreetMap',
+                name='OpenStreetMap'
+            ),
+            'Satelital': folium.TileLayer(
+                tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+                attr='Esri',
+                name='Satelital'
+            ),
+            'Híbrido': folium.TileLayer(
+                tiles='https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}',
+                attr='Google',
+                name='Híbrido'
+            )
+        }
+
+        # Create base map
+        m = folium.Map(
+            location=[df[self.lat_col].mean(), df[self.lon_col].mean()],
+            zoom_start=10,
+            tiles=None  # Don't set any tiles initially
+        )
+
+        # Add all tile layers to the map
+        for layer in tile_layers.values():
+            layer.add_to(m)
+
+        # Set the selected tile layer as active
+        tile_layers[self.current_map_type].add_to(m)
+
         if self.use_clustering_cb.isChecked():
             marker_cluster = MarkerCluster().add_to(m)
         else:
@@ -212,16 +265,16 @@ class CoordPlotter(QWidget):
                 icon=folium.Icon(color=color, icon="info-sign")
             ).add_to(marker_cluster)
 
+        # Add layer control
+        folium.LayerControl().add_to(m)
+
         temp_map_path = os.path.join(os.path.dirname(__file__), "temp_map.html")
         m.save(temp_map_path)
 
-        if self.new_window_cb.isChecked():
-            if self.map_window is None or not self.map_window.isVisible():
-                self.map_window = MapWindow(self)
-            self.map_window.map_view.setUrl(QUrl.fromLocalFile(temp_map_path))
-            self.map_window.show()
-        else:
-            self.map_view.setUrl(QUrl.fromLocalFile(temp_map_path))
+        if self.map_window is None or not self.map_window.isVisible():
+            self.map_window = MapWindow(self)
+        self.map_window.map_view.setUrl(QUrl.fromLocalFile(temp_map_path))
+        self.map_window.show()
 
         self.status_label.setText('Mapa generado con éxito.')
         self.map = m
@@ -258,7 +311,6 @@ class CoordPlotter(QWidget):
                 self.status_label.setText(f'Error al guardar el archivo KMZ: {str(e)}')
 
     def find_column(self, df, possible_names):
-        # Convertimos todas las columnas a minúsculas para hacer la búsqueda insensible a mayúsculas/minúsculas
         lower_columns = {col.lower(): col for col in df.columns}
         for name in possible_names:
             if name.lower() in lower_columns:
